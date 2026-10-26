@@ -1,8 +1,11 @@
+use crate::draw;
 use crate::mailbox::Mailbox;
 use crate::types::{Landmarks, RgbFrame, RgbaFrame};
+use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 /// Converts an RGB8 image buffer into mirrored RGBA8 with alpha = 255 in a single pass.
 pub fn mirror_rgb_to_rgba(rgb: &[u8], w: u32, h: u32, out: &mut Vec<u8>) {
@@ -39,20 +42,38 @@ pub fn spawn(
     out: Arc<Mailbox<RgbaFrame>>,
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
+    let debug_mode = env::var("AR_DEBUG").map(|v| v == "1").unwrap_or(false);
+
     thread::spawn(move || {
         let mut buf = Vec::new();
 
         while !shutdown.load(Ordering::Relaxed) {
             let frame = match frames_in.take_blocking() {
                 Some(f) => f,
-                None => break, // Mailbox closed or shutting down
+                None => break,
             };
 
             mirror_rgb_to_rgba(&frame.data, frame.w, frame.h, &mut buf);
 
-            // Landmark drawing will be added in Phase 3/4.
-            // Consume landmarks_in safely to keep it referenced:
-            let _ = landmarks_in.get();
+            if let Some(lm) = landmarks_in.get() {
+                if lm.at.elapsed() < Duration::from_millis(250) && debug_mode {
+                    // Draw every 4th landmark as a 2px green dot in mirrored screen space
+                    for (i, pt) in lm.points.iter().enumerate() {
+                        if i % 4 == 0 {
+                            let mirrored_x = frame.w as f32 - 1.0 - pt[0];
+                            draw::dot(
+                                &mut buf,
+                                frame.w,
+                                frame.h,
+                                mirrored_x,
+                                pt[1],
+                                2,
+                                [0, 255, 120, 255],
+                            );
+                        }
+                    }
+                }
+            }
 
             out.put(RgbaFrame {
                 w: frame.w,
@@ -69,18 +90,12 @@ mod tests {
 
     #[test]
     fn test_mirror_rgb_to_rgba_3x2() {
-        // 3x2 image:
-        // Row 0: [R1, G1, B1], [R2, G2, B2], [R3, G3, B3]
-        // Row 1: [R4, G4, B4], [R5, G5, B5], [R6, G6, B6]
         let rgb = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
         ];
         let mut out = Vec::new();
         mirror_rgb_to_rgba(&rgb, 3, 2, &mut out);
 
-        // Expected mirrored:
-        // Row 0: [R3, G3, B3, 255], [R2, G2, B2, 255], [R1, G1, B1, 255]
-        // Row 1: [R6, G6, B6, 255], [R5, G5, B5, 255], [R4, G4, B4, 255]
         let expected = vec![
             7, 8, 9, 255, 4, 5, 6, 255, 1, 2, 3, 255, 16, 17, 18, 255, 13, 14, 15, 255, 10, 11, 12,
             255,

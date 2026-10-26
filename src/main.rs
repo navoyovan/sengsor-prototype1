@@ -1,5 +1,6 @@
 pub mod camera;
 pub mod compositor;
+pub mod draw;
 pub mod gui;
 pub mod inference;
 pub mod mailbox;
@@ -77,8 +78,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let models_dir = get_models_dir();
-    let _ = check_model_file(&models_dir, "face_detection_short_range.onnx")?;
-    let _ = check_model_file(&models_dir, "face_mesh_Nx3x192x192.onnx")?;
+    let detector_path = check_model_file(&models_dir, "face_detection_short_range.onnx")?;
+    let mesh_path = check_model_file(&models_dir, "face_mesh_Nx3x192x192.onnx")?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -86,6 +87,14 @@ fn main() -> anyhow::Result<()> {
     let camera_to_compositor = Mailbox::<Arc<RgbFrame>>::new();
     let inference_to_compositor = Mailbox::<Landmarks>::new();
     let compositor_to_gui = Mailbox::<RgbaFrame>::new();
+
+    let inference_handle = inference::spawn(
+        &detector_path,
+        &mesh_path,
+        Arc::clone(&camera_to_inference),
+        Arc::clone(&inference_to_compositor),
+        Arc::clone(&shutdown),
+    )?;
 
     let camera_res = camera::start(vec![
         Arc::clone(&camera_to_inference),
@@ -128,6 +137,7 @@ fn main() -> anyhow::Result<()> {
     compositor_to_gui.close();
 
     let _ = compositor_handle.join();
+    let _ = inference_handle.join();
     log::info!("Shutdown complete.");
 
     Ok(())
