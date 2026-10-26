@@ -14,7 +14,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use types::{Landmarks, RgbFrame, RgbaFrame};
+use types::{Landmarks, RgbFrame, RgbaFrame, Stats};
 
 fn get_models_dir() -> PathBuf {
     env::var("AR_MODELS_DIR")
@@ -83,6 +83,7 @@ fn main() -> anyhow::Result<()> {
     let mesh_path = check_model_file(&models_dir, "face_mesh_Nx3x192x192.onnx")?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let stats = Stats::new();
 
     let camera_to_inference = Mailbox::<Arc<RgbFrame>>::new();
     let camera_to_compositor = Mailbox::<Arc<RgbFrame>>::new();
@@ -94,13 +95,17 @@ fn main() -> anyhow::Result<()> {
         &mesh_path,
         Arc::clone(&camera_to_inference),
         Arc::clone(&inference_to_compositor),
+        Arc::clone(&stats),
         Arc::clone(&shutdown),
     )?;
 
-    let camera_res = camera::start(vec![
-        Arc::clone(&camera_to_inference),
-        Arc::clone(&camera_to_compositor),
-    ]);
+    let camera_res = camera::start(
+        vec![
+            Arc::clone(&camera_to_inference),
+            Arc::clone(&camera_to_compositor),
+        ],
+        Arc::clone(&stats),
+    );
 
     let mut camera_error = None;
     let _camera = match camera_res {
@@ -124,6 +129,7 @@ fn main() -> anyhow::Result<()> {
 
     let gui_flags = gui::Flags {
         frame_in: Arc::clone(&compositor_to_gui),
+        stats: Arc::clone(&stats),
         shutdown: Arc::clone(&shutdown),
         camera_error,
     };

@@ -3,7 +3,7 @@ pub mod mesh;
 pub mod roi;
 
 use crate::mailbox::Mailbox;
-use crate::types::{Landmarks, RgbFrame};
+use crate::types::{Landmarks, RgbFrame, Stats};
 use detector::{decode_detections, generate_anchors, letterbox_frame, Anchor};
 use mesh::MeshSession;
 use ort::session::builder::GraphOptimizationLevel;
@@ -60,27 +60,37 @@ pub fn spawn(
     mesh_path: &Path,
     frames_in: Arc<Mailbox<Arc<RgbFrame>>>,
     landmarks_out: Arc<Mailbox<Landmarks>>,
+    stats: Arc<Stats>,
     shutdown: Arc<AtomicBool>,
 ) -> anyhow::Result<JoinHandle<()>> {
     let mut detector = DetectorSession::new(detector_path)?;
     let mut mesh = MeshSession::new(mesh_path)?;
 
     let handle = thread::spawn(move || {
+        let mut ema_infer_ms = 0.0f32;
+
         while !shutdown.load(Ordering::Relaxed) {
             let frame = match frames_in.take_blocking() {
                 Some(f) => f,
                 None => break,
             };
 
+            let t0 = Instant::now();
+
             let detection = match detector.detect(&frame.data, frame.w, frame.h, 0.5) {
                 Ok(Some(d)) => d,
                 Ok(None) => {
                     landmarks_out.clear();
+                    stats.set_face_detected(false);
+                    let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
+                    ema_infer_ms = 0.9 * ema_infer_ms + 0.1 * elapsed;
+                    stats.set_inference_ms(ema_infer_ms.round() as u32);
                     continue;
                 }
                 Err(e) => {
                     log::warn!("Detector error: {e}");
                     landmarks_out.clear();
+                    stats.set_face_detected(false);
                     continue;
                 }
             };
@@ -90,6 +100,11 @@ pub fn spawn(
 
             match mesh.run(&roi_tensor, &roi, 0.5) {
                 Ok(Some(result)) => {
+                    let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
+                    ema_infer_ms = 0.9 * ema_infer_ms + 0.1 * elapsed;
+                    stats.set_inference_ms(ema_infer_ms.round() as u32);
+                    stats.set_face_detected(true);
+
                     landmarks_out.put(Landmarks {
                         frame_id: frame.id,
                         frame_w: frame.w,
@@ -101,10 +116,15 @@ pub fn spawn(
                 }
                 Ok(None) => {
                     landmarks_out.clear();
+                    stats.set_face_detected(false);
+                    let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
+                    ema_infer_ms = 0.9 * ema_infer_ms + 0.1 * elapsed;
+                    stats.set_inference_ms(ema_infer_ms.round() as u32);
                 }
                 Err(e) => {
                     log::warn!("Mesh error: {e}");
                     landmarks_out.clear();
+                    stats.set_face_detected(false);
                 }
             }
         }
