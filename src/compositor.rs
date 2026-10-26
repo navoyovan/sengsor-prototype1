@@ -7,6 +7,43 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+/// Exponential Moving Average filter for 3 tracked 2D landmark points.
+pub struct Smoother {
+    alpha: f32,
+    state: Option<[[f32; 2]; 3]>,
+}
+
+impl Smoother {
+    pub fn new(alpha: f32) -> Self {
+        Self {
+            alpha: alpha.clamp(0.01, 1.0),
+            state: None,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.state = None;
+    }
+
+    pub fn update(&mut self, points: [[f32; 2]; 3]) -> [[f32; 2]; 3] {
+        match self.state {
+            None => {
+                self.state = Some(points);
+                points
+            }
+            Some(prev) => {
+                let mut smoothed = [[0.0, 0.0]; 3];
+                for i in 0..3 {
+                    smoothed[i][0] = prev[i][0] + self.alpha * (points[i][0] - prev[i][0]);
+                    smoothed[i][1] = prev[i][1] + self.alpha * (points[i][1] - prev[i][1]);
+                }
+                self.state = Some(smoothed);
+                smoothed
+            }
+        }
+    }
+}
+
 /// Converts an RGB8 image buffer into mirrored RGBA8 with alpha = 255 in a single pass.
 pub fn mirror_rgb_to_rgba(rgb: &[u8], w: u32, h: u32, out: &mut Vec<u8>) {
     let out_len = (w * h * 4) as usize;
@@ -43,9 +80,14 @@ pub fn spawn(
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     let debug_mode = env::var("AR_DEBUG").map(|v| v == "1").unwrap_or(false);
+    let alpha = env::var("AR_EMA")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.35);
 
     thread::spawn(move || {
         let mut buf = Vec::new();
+        let mut _smoother = Smoother::new(alpha);
 
         while !shutdown.load(Ordering::Relaxed) {
             let frame = match frames_in.take_blocking() {
@@ -57,7 +99,6 @@ pub fn spawn(
 
             if let Some(lm) = landmarks_in.get() {
                 if lm.at.elapsed() < Duration::from_millis(250) && debug_mode {
-                    // Draw every 4th landmark as a 2px green dot in mirrored screen space
                     for (i, pt) in lm.points.iter().enumerate() {
                         if i % 4 == 0 {
                             let mirrored_x = frame.w as f32 - 1.0 - pt[0];
@@ -87,6 +128,27 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_smoother_convergence_and_reset() {
+        let mut s = Smoother::new(0.5);
+        let pt1 = [[10.0, 10.0], [20.0, 20.0], [30.0, 30.0]];
+        let r1 = s.update(pt1);
+        assert_eq!(r1, pt1);
+
+        // Feed constant input pt2
+        let pt2 = [[20.0, 20.0], [40.0, 40.0], [60.0, 60.0]];
+        let r2 = s.update(pt2);
+        // Halfway between 10 and 20 is 15
+        assert!((r2[0][0] - 15.0).abs() < 1e-4);
+
+        // Reset
+        s.reset();
+        assert!(s.state.is_none());
+        let r3 = s.update(pt2);
+        // After reset, first update takes target directly
+        assert_eq!(r3, pt2);
+    }
 
     #[test]
     fn test_mirror_rgb_to_rgba_3x2() {
