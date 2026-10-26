@@ -1,6 +1,7 @@
 pub mod camera;
 pub mod compositor;
 pub mod gui;
+pub mod inference;
 pub mod mailbox;
 pub mod types;
 
