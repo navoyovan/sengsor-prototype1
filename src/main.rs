@@ -17,9 +17,32 @@ use std::sync::Arc;
 use types::{Landmarks, RgbFrame, RgbaFrame, Stats};
 
 fn get_models_dir() -> PathBuf {
-    env::var("AR_MODELS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("assets/models"))
+    if let Ok(dir) = env::var("AR_MODELS_DIR") {
+        return PathBuf::from(dir);
+    }
+
+    // 1. Check relative to current working directory (e.g. running from repo root)
+    let cwd_assets = PathBuf::from("assets/models");
+    if cwd_assets.exists() {
+        return cwd_assets;
+    }
+
+    // 2. Check relative to the executable location (e.g. double-clicking inside target/release or elsewhere)
+    if let Ok(mut exe_dir) = env::current_exe() {
+        exe_dir.pop();
+        // Check exe_dir/assets/models
+        let next_to_exe = exe_dir.join("assets").join("models");
+        if next_to_exe.exists() {
+            return next_to_exe;
+        }
+        // Check ../../assets/models (when running from target/release/)
+        let repo_root_relative = exe_dir.join("..").join("..").join("assets").join("models");
+        if repo_root_relative.exists() {
+            return repo_root_relative;
+        }
+    }
+
+    cwd_assets
 }
 
 fn check_model_file(dir: &Path, filename: &str) -> anyhow::Result<PathBuf> {

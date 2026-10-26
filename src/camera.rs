@@ -1,7 +1,7 @@
 use crate::mailbox::Mailbox;
 use crate::types::{RgbFrame, Stats};
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType};
+use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::CallbackCamera;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -12,9 +12,8 @@ pub fn start(
     stats: Arc<Stats>,
 ) -> anyhow::Result<CallbackCamera> {
     let index = CameraIndex::Index(0);
-    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
-        CameraFormat::new_from(640, 480, FrameFormat::MJPEG, 30),
-    ));
+    // Request highest frame rate / closest format without hard-pinning MJPEG (which some cameras don't support in MediaFoundation)
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::HighestFrameRate(30));
 
     let frame_counter = Arc::new(AtomicU64::new(0));
     let frame_counter_cb = Arc::clone(&frame_counter);
