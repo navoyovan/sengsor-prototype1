@@ -1,7 +1,7 @@
 use crate::draw;
 use crate::mailbox::Mailbox;
 use crate::sticker::{transform_crown, Transform};
-use crate::types::{Landmarks, RgbFrame, RgbaFrame};
+use crate::types::{Landmarks, RgbFrame, RgbaFrame, Stats};
 use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -78,17 +78,24 @@ pub fn spawn(
     frames_in: Arc<Mailbox<Arc<RgbFrame>>>,
     landmarks_in: Arc<Mailbox<Landmarks>>,
     out: Arc<Mailbox<RgbaFrame>>,
+    stats: Arc<Stats>,
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
-    let debug_mode = env::var("AR_DEBUG").map(|v| v == "1").unwrap_or(false);
-    let alpha = env::var("AR_EMA")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.35);
+    let debug_mode_env = env::var("AR_DEBUG").map(|v| v == "1").unwrap_or(false);
+    if debug_mode_env {
+        stats.debug_dots.store(true, Ordering::Relaxed);
+    }
+    if let Ok(var_val) = env::var("AR_EMA") {
+        if let Ok(val) = var_val.parse::<f32>() {
+            stats
+                .ema_alpha_pct
+                .store((val * 100.0).clamp(1.0, 100.0) as u32, Ordering::Relaxed);
+        }
+    }
 
     thread::spawn(move || {
         let mut buf = Vec::new();
-        let mut smoother = Smoother::new(alpha);
+        let mut smoother = Smoother::new(stats.ema_alpha());
 
         while !shutdown.load(Ordering::Relaxed) {
             let frame = match frames_in.take_blocking() {
@@ -99,20 +106,20 @@ pub fn spawn(
             mirror_rgb_to_rgba(&frame.data, frame.w, frame.h, &mut buf);
 
             let mut face_active = false;
+            let current_alpha = stats.ema_alpha();
+            smoother.alpha = current_alpha.clamp(0.01, 1.0);
+
+            let show_dots = stats.debug_dots.load(Ordering::Relaxed);
+            let show_crown = stats.draw_crown.load(Ordering::Relaxed);
 
             if let Some(lm) = landmarks_in.get() {
                 if lm.at.elapsed() < Duration::from_millis(250) && lm.points.len() >= 468 {
                     face_active = true;
 
-                    // Landmarks:
-                    // 33: right eye inner / outer corner
-                    // 263: left eye inner / outer corner
-                    // 10: top center forehead
                     let pt_33 = lm.points[33];
                     let pt_263 = lm.points[263];
                     let pt_10 = lm.points[10];
 
-                    // Convert to mirrored screen coordinates
                     let mirror_x = |x: f32| frame.w as f32 - 1.0 - x;
 
                     let raw_points = [
@@ -122,20 +129,21 @@ pub fn spawn(
                     ];
 
                     let smoothed = smoother.update(raw_points);
-                    let eye_a = smoothed[0];
-                    let eye_b = smoothed[1];
-                    let anchor = smoothed[2];
 
-                    let transform = Transform::from_screen_points(eye_a, eye_b, anchor);
-                    let segments = transform_crown(&transform);
+                    if show_crown {
+                        let eye_a = smoothed[0];
+                        let eye_b = smoothed[1];
+                        let anchor = smoothed[2];
 
-                    // Draw the green wireframe crown (thickness 3)
-                    for (p1, p2) in segments {
-                        draw::line(&mut buf, frame.w, frame.h, p1, p2, 3, [0, 255, 120, 255]);
+                        let transform = Transform::from_screen_points(eye_a, eye_b, anchor);
+                        let segments = transform_crown(&transform);
+
+                        for (p1, p2) in segments {
+                            draw::line(&mut buf, frame.w, frame.h, p1, p2, 3, [0, 255, 120, 255]);
+                        }
                     }
 
-                    if debug_mode {
-                        // Draw every 4th landmark as a 2px green dot in mirrored screen space
+                    if show_dots {
                         for (i, pt) in lm.points.iter().enumerate() {
                             if i % 4 == 0 {
                                 let mirrored_x = mirror_x(pt[0]);

@@ -68,6 +68,7 @@ pub fn spawn(
 
     let handle = thread::spawn(move || {
         let mut ema_infer_ms = 0.0f32;
+        let mut prev_landmarks: Option<Vec<[f32; 2]>> = None;
 
         while !shutdown.load(Ordering::Relaxed) {
             let frame = match frames_in.take_blocking() {
@@ -76,26 +77,52 @@ pub fn spawn(
             };
 
             let t0 = Instant::now();
+            let fast_tracking = stats.skip_detection_tracking.load(Ordering::Relaxed);
 
-            let detection = match detector.detect(&frame.data, frame.w, frame.h, 0.5) {
-                Ok(Some(d)) => d,
-                Ok(None) => {
-                    landmarks_out.clear();
-                    stats.set_face_detected(false);
-                    let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
-                    ema_infer_ms = 0.9 * ema_infer_ms + 0.1 * elapsed;
-                    stats.set_inference_ms(ema_infer_ms.round() as u32);
-                    continue;
+            // If fast tracking is enabled and we have previous landmarks, derive ROI directly from landmarks!
+            let roi = if fast_tracking && prev_landmarks.as_ref().is_some_and(|l| l.len() >= 468) {
+                let pts = prev_landmarks.as_ref().unwrap();
+                let left_eye = pts[263];
+                let right_eye = pts[33];
+                let cx = (left_eye[0] + right_eye[0]) * 0.5;
+                let cy = (left_eye[1] + right_eye[1]) * 0.5;
+
+                // Estimate bounding side from eye distance
+                let dx = left_eye[0] - right_eye[0];
+                let dy = left_eye[1] - right_eye[1];
+                let eye_dist = (dx * dx + dy * dy).sqrt();
+                let side = eye_dist * 3.5;
+                let theta = dy.atan2(dx);
+
+                Roi {
+                    cx,
+                    cy,
+                    side,
+                    theta,
                 }
-                Err(e) => {
-                    log::warn!("Detector error: {e}");
-                    landmarks_out.clear();
-                    stats.set_face_detected(false);
-                    continue;
-                }
+            } else {
+                let detection = match detector.detect(&frame.data, frame.w, frame.h, 0.5) {
+                    Ok(Some(d)) => d,
+                    Ok(None) => {
+                        prev_landmarks = None;
+                        landmarks_out.clear();
+                        stats.set_face_detected(false);
+                        let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
+                        ema_infer_ms = 0.9 * ema_infer_ms + 0.1 * elapsed;
+                        stats.set_inference_ms(ema_infer_ms.round() as u32);
+                        continue;
+                    }
+                    Err(e) => {
+                        log::warn!("Detector error: {e}");
+                        prev_landmarks = None;
+                        landmarks_out.clear();
+                        stats.set_face_detected(false);
+                        continue;
+                    }
+                };
+                Roi::from_detection(&detection)
             };
 
-            let roi = Roi::from_detection(&detection);
             let roi_tensor = sample_rotated_roi(&frame.data, frame.w, frame.h, &roi);
 
             match mesh.run(&roi_tensor, &roi, 0.5) {
@@ -104,6 +131,8 @@ pub fn spawn(
                     ema_infer_ms = 0.9 * ema_infer_ms + 0.1 * elapsed;
                     stats.set_inference_ms(ema_infer_ms.round() as u32);
                     stats.set_face_detected(true);
+
+                    prev_landmarks = Some(result.points.clone());
 
                     landmarks_out.put(Landmarks {
                         frame_id: frame.id,
@@ -115,6 +144,7 @@ pub fn spawn(
                     });
                 }
                 Ok(None) => {
+                    prev_landmarks = None;
                     landmarks_out.clear();
                     stats.set_face_detected(false);
                     let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
@@ -123,6 +153,7 @@ pub fn spawn(
                 }
                 Err(e) => {
                     log::warn!("Mesh error: {e}");
+                    prev_landmarks = None;
                     landmarks_out.clear();
                     stats.set_face_detected(false);
                 }

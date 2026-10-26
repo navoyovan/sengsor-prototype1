@@ -122,31 +122,62 @@ fn main() -> anyhow::Result<()> {
         Arc::clone(&shutdown),
     )?;
 
-    let camera_res = camera::start(
-        vec![
-            Arc::clone(&camera_to_inference),
-            Arc::clone(&camera_to_compositor),
-        ],
-        Arc::clone(&stats),
-    );
+    let available_cameras = camera::list_cameras();
+    let initial_cam_index = available_cameras.first().map(|c| c.index_num).unwrap_or(0);
+    stats
+        .selected_camera_index
+        .store(initial_cam_index, Ordering::Relaxed);
 
-    let mut camera_error = None;
-    let _camera = match camera_res {
-        Ok(cam) => {
-            log::info!("Webcam initialized successfully.");
-            Some(cam)
+    let camera_to_inference_clone = Arc::clone(&camera_to_inference);
+    let camera_to_compositor_clone = Arc::clone(&camera_to_compositor);
+    let stats_cam_clone = Arc::clone(&stats);
+    let shutdown_cam_clone = Arc::clone(&shutdown);
+
+    // Spawn camera supervisor thread to allow dynamic switching
+    let camera_thread = std::thread::spawn(move || {
+        let mut _current_cam = camera::start(
+            vec![
+                Arc::clone(&camera_to_inference_clone),
+                Arc::clone(&camera_to_compositor_clone),
+            ],
+            Arc::clone(&stats_cam_clone),
+            initial_cam_index,
+        )
+        .ok();
+
+        while !shutdown_cam_clone.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            if stats_cam_clone
+                .switch_camera_requested
+                .swap(false, Ordering::Relaxed)
+            {
+                let target_index = stats_cam_clone
+                    .selected_camera_index
+                    .load(Ordering::Relaxed);
+                log::info!("Switching camera device to index {target_index}...");
+                // Drop current camera to release device handle
+                _current_cam.take();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+
+                _current_cam = camera::start(
+                    vec![
+                        Arc::clone(&camera_to_inference_clone),
+                        Arc::clone(&camera_to_compositor_clone),
+                    ],
+                    Arc::clone(&stats_cam_clone),
+                    target_index,
+                )
+                .ok();
+            }
         }
-        Err(e) => {
-            log::error!("Camera not available: {e}");
-            camera_error = Some(e.to_string());
-            None
-        }
-    };
+    });
 
     let compositor_handle = compositor::spawn(
         Arc::clone(&camera_to_compositor),
         Arc::clone(&inference_to_compositor),
         Arc::clone(&compositor_to_gui),
+        Arc::clone(&stats),
         Arc::clone(&shutdown),
     );
 
@@ -154,7 +185,8 @@ fn main() -> anyhow::Result<()> {
         frame_in: Arc::clone(&compositor_to_gui),
         stats: Arc::clone(&stats),
         shutdown: Arc::clone(&shutdown),
-        camera_error,
+        camera_error: None,
+        available_cameras,
     };
 
     // Run the iced GUI (blocks until the window is closed)
@@ -171,6 +203,7 @@ fn main() -> anyhow::Result<()> {
 
     let _ = compositor_handle.join();
     let _ = inference_handle.join();
+    let _ = camera_thread.join();
     log::info!("Shutdown complete.");
 
     Ok(())
