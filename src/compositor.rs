@@ -1,5 +1,6 @@
 use crate::draw;
 use crate::mailbox::Mailbox;
+use crate::sticker::{transform_crown, Transform};
 use crate::types::{Landmarks, RgbFrame, RgbaFrame};
 use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,7 +88,7 @@ pub fn spawn(
 
     thread::spawn(move || {
         let mut buf = Vec::new();
-        let mut _smoother = Smoother::new(alpha);
+        let mut smoother = Smoother::new(alpha);
 
         while !shutdown.load(Ordering::Relaxed) {
             let frame = match frames_in.take_blocking() {
@@ -97,23 +98,64 @@ pub fn spawn(
 
             mirror_rgb_to_rgba(&frame.data, frame.w, frame.h, &mut buf);
 
+            let mut face_active = false;
+
             if let Some(lm) = landmarks_in.get() {
-                if lm.at.elapsed() < Duration::from_millis(250) && debug_mode {
-                    for (i, pt) in lm.points.iter().enumerate() {
-                        if i % 4 == 0 {
-                            let mirrored_x = frame.w as f32 - 1.0 - pt[0];
-                            draw::dot(
-                                &mut buf,
-                                frame.w,
-                                frame.h,
-                                mirrored_x,
-                                pt[1],
-                                2,
-                                [0, 255, 120, 255],
-                            );
+                if lm.at.elapsed() < Duration::from_millis(250) && lm.points.len() >= 468 {
+                    face_active = true;
+
+                    // Landmarks:
+                    // 33: right eye inner / outer corner
+                    // 263: left eye inner / outer corner
+                    // 10: top center forehead
+                    let pt_33 = lm.points[33];
+                    let pt_263 = lm.points[263];
+                    let pt_10 = lm.points[10];
+
+                    // Convert to mirrored screen coordinates
+                    let mirror_x = |x: f32| frame.w as f32 - 1.0 - x;
+
+                    let raw_points = [
+                        [mirror_x(pt_33[0]), pt_33[1]],
+                        [mirror_x(pt_263[0]), pt_263[1]],
+                        [mirror_x(pt_10[0]), pt_10[1]],
+                    ];
+
+                    let smoothed = smoother.update(raw_points);
+                    let eye_a = smoothed[0];
+                    let eye_b = smoothed[1];
+                    let anchor = smoothed[2];
+
+                    let transform = Transform::from_screen_points(eye_a, eye_b, anchor);
+                    let segments = transform_crown(&transform);
+
+                    // Draw the green wireframe crown (thickness 3)
+                    for (p1, p2) in segments {
+                        draw::line(&mut buf, frame.w, frame.h, p1, p2, 3, [0, 255, 120, 255]);
+                    }
+
+                    if debug_mode {
+                        // Draw every 4th landmark as a 2px green dot in mirrored screen space
+                        for (i, pt) in lm.points.iter().enumerate() {
+                            if i % 4 == 0 {
+                                let mirrored_x = mirror_x(pt[0]);
+                                draw::dot(
+                                    &mut buf,
+                                    frame.w,
+                                    frame.h,
+                                    mirrored_x,
+                                    pt[1],
+                                    2,
+                                    [0, 255, 120, 255],
+                                );
+                            }
                         }
                     }
                 }
+            }
+
+            if !face_active {
+                smoother.reset();
             }
 
             out.put(RgbaFrame {
@@ -136,17 +178,13 @@ mod tests {
         let r1 = s.update(pt1);
         assert_eq!(r1, pt1);
 
-        // Feed constant input pt2
         let pt2 = [[20.0, 20.0], [40.0, 40.0], [60.0, 60.0]];
         let r2 = s.update(pt2);
-        // Halfway between 10 and 20 is 15
         assert!((r2[0][0] - 15.0).abs() < 1e-4);
 
-        // Reset
         s.reset();
         assert!(s.state.is_none());
         let r3 = s.update(pt2);
-        // After reset, first update takes target directly
         assert_eq!(r3, pt2);
     }
 
