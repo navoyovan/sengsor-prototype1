@@ -13,11 +13,13 @@ use std::time::Duration;
 pub struct Flags {
     pub frame_in: Arc<Mailbox<RgbaFrame>>,
     pub shutdown: Arc<AtomicBool>,
+    pub camera_error: Option<String>,
 }
 
 pub struct App {
     frame_in: Arc<Mailbox<RgbaFrame>>,
     _shutdown: Arc<AtomicBool>,
+    camera_error: Option<String>,
     handle: Option<Handle>,
 }
 
@@ -37,6 +39,7 @@ impl Application for App {
             Self {
                 frame_in: flags.frame_in,
                 _shutdown: flags.shutdown,
+                camera_error: flags.camera_error,
                 handle: None,
             },
             Command::none(),
@@ -65,7 +68,13 @@ impl Application for App {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into(),
-            None => text("Waiting for camera...").size(24).into(),
+            None => {
+                if let Some(err) = &self.camera_error {
+                    text(format!("Camera not available: {err}")).size(20).into()
+                } else {
+                    text("Waiting for camera...").size(24).into()
+                }
+            }
         };
 
         container(content)

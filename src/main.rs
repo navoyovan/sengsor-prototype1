@@ -102,6 +102,7 @@ fn main() -> anyhow::Result<()> {
         Arc::clone(&camera_to_compositor),
     ]);
 
+    let mut camera_error = None;
     let _camera = match camera_res {
         Ok(cam) => {
             log::info!("Webcam initialized successfully.");
@@ -109,6 +110,7 @@ fn main() -> anyhow::Result<()> {
         }
         Err(e) => {
             log::error!("Camera not available: {e}");
+            camera_error = Some(e.to_string());
             None
         }
     };
@@ -123,6 +125,7 @@ fn main() -> anyhow::Result<()> {
     let gui_flags = gui::Flags {
         frame_in: Arc::clone(&compositor_to_gui),
         shutdown: Arc::clone(&shutdown),
+        camera_error,
     };
 
     // Run the iced GUI (blocks until the window is closed)
