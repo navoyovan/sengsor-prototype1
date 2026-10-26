@@ -1,4 +1,5 @@
 pub mod camera;
+pub mod compositor;
 pub mod mailbox;
 pub mod types;
 
