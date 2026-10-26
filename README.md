@@ -84,7 +84,7 @@ $env:AR_DEBUG=1; $env:AR_HUD=1; cargo run --release
 
 ---
 
-## Verification & Performance Benchmarks
+## Verification & Performance Benchmarks (BLAZING FAST)
 
 | Metric                | Target                    | Measured Result                        |
 | --------------------- | ------------------------- | -------------------------------------- |
