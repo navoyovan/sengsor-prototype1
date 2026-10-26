@@ -4,6 +4,7 @@ pub mod draw;
 pub mod gui;
 pub mod inference;
 pub mod mailbox;
+pub mod sticker;
 pub mod types;
 
 use mailbox::Mailbox;
