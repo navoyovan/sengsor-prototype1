@@ -1,12 +1,17 @@
 pub mod camera;
 pub mod compositor;
+pub mod gui;
 pub mod mailbox;
 pub mod types;
 
+use mailbox::Mailbox;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use types::{Landmarks, RgbFrame, RgbaFrame};
 
 fn get_models_dir() -> PathBuf {
     env::var("AR_MODELS_DIR")
@@ -73,6 +78,56 @@ fn main() -> anyhow::Result<()> {
     let models_dir = get_models_dir();
     let _ = check_model_file(&models_dir, "face_detection_short_range.onnx")?;
     let _ = check_model_file(&models_dir, "face_mesh_Nx3x192x192.onnx")?;
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    let camera_to_inference = Mailbox::<Arc<RgbFrame>>::new();
+    let camera_to_compositor = Mailbox::<Arc<RgbFrame>>::new();
+    let inference_to_compositor = Mailbox::<Landmarks>::new();
+    let compositor_to_gui = Mailbox::<RgbaFrame>::new();
+
+    let camera_res = camera::start(vec![
+        Arc::clone(&camera_to_inference),
+        Arc::clone(&camera_to_compositor),
+    ]);
+
+    let _camera = match camera_res {
+        Ok(cam) => {
+            log::info!("Webcam initialized successfully.");
+            Some(cam)
+        }
+        Err(e) => {
+            log::error!("Camera not available: {e}");
+            None
+        }
+    };
+
+    let compositor_handle = compositor::spawn(
+        Arc::clone(&camera_to_compositor),
+        Arc::clone(&inference_to_compositor),
+        Arc::clone(&compositor_to_gui),
+        Arc::clone(&shutdown),
+    );
+
+    let gui_flags = gui::Flags {
+        frame_in: Arc::clone(&compositor_to_gui),
+        shutdown: Arc::clone(&shutdown),
+    };
+
+    // Run the iced GUI (blocks until the window is closed)
+    if let Err(e) = gui::run(gui_flags) {
+        log::error!("GUI error: {e}");
+    }
+
+    // Clean shutdown sequence
+    shutdown.store(true, Ordering::Relaxed);
+    camera_to_inference.close();
+    camera_to_compositor.close();
+    inference_to_compositor.close();
+    compositor_to_gui.close();
+
+    let _ = compositor_handle.join();
+    log::info!("Shutdown complete.");
 
     Ok(())
 }
